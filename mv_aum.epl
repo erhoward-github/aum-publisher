@@ -1,0 +1,406 @@
+[#!embperl2 #]
+[#
+=================================================
+  Last edited by:  $Author: rhoward $
+              on:  $Date: 2015/05/13 22:40:48 $
+        Filename:  $RCSfile: mv_aum.epl,v $
+        Revision:  $Revision: 1.40 $
+=================================================
+- MV_AUM mode for AUM Publisher
+=================================================
+#]
+[!
+    use warnings;
+    use BFM::EPLSecurity; 
+    use BFM::GetFile;
+    use BFM::LogNG;
+    use HTML::Entities;
+    use BFM::AUM::MVAUM;
+    use Benchmark;
+!]
+[-
+    #---------------------------------------------------------------#
+    # Get View Data hashref
+    $CFG  = $param[0];
+    $rhModeData = $param[1]; # Data from the business object
+    $debug = 0;
+    if($debug)
+    {
+        require Data::Dumper;
+        Data::Dumper->import;
+    }
+    
+    $BENCHMARK_OK = 1;
+    $benchInitStart = new Benchmark if $BENCHMARK_OK;
+    BFM::EPLSecurity::checkWhiteList(\%fdat, $ENV{SCRIPT_NAME}, \*OUT);    
+    $Data::Dumper::Indent = 1;
+    $Data::Dumper::Sortkeys = 1;
+    
+    $rhSnapshots = $rhModeData->{'snapshots'};
+    $active = $rhSnapshots->{'active_snapshot'};
+    $status = $rhSnapshots->{'active_snapshot'}->{'status'};
+    $MV_AUM_STATUS = $BFM::AUM::MV_AUM::STATUS;
+    
+    $MVDEBUG_FILE = "AUMPublisherMVDebug.log";
+    $MVDEBUG_LOG = BFM::GetFile::get_file('AUMReportDir') . '/manager_view/' . $MVDEBUG_FILE;
+    $logLogNG = new BFM::LogNG(
+        File => {FileName => $MVDEBUG_LOG},
+    );
+    
+    $rhPortDate = $rhModeData->{'port_date'};
+    $rhPurpose = $rhModeData->{'purpose'};
+    $options = {
+        asof_date => $rhPortDate,
+        purpose => $rhPurpose,
+    };
+    $ERROR_DESCRIPTION = $rhModeData->{'MESSAGES'}->{'EXCEPTION'} || 
+        $rhModeData->{'MESSAGES'}->{'STATUS'} ||
+        $rhModeData->{'MESSAGES'}->{'ERROR_DATA'}->{'DESCRIPTION'} ||
+        '';
+    
+    $MAXIMUM_NUMBER_OF_SNAPSHOTS = 3;
+    
+    
+    $benchInitEnd = new Benchmark if $BENCHMARK_OK;
+    $logLogNG->Log(LOG_INFO, 'mv_aum.epl:: benchmark init: ' . timestr(timediff($benchInitEnd, $benchInitStart))) if $BENCHMARK_OK;
+-]
+[$ if ($rhModeData->{'open_report'}) $]
+<script language="JavaScript">
+    window.open("/tmp/[+ $rhModeData->{'open_report'} +]");
+</script>
+[$ endif $]
+[$ if($debug) $]
+<div><dl><dt>rhModeData:</dt>
+<dd>
+[+ Dumper $rhModeData +]
+</dd>
+</dl>
+</div>
+[$ endif $]
+<div class='warning' id='ERROR_DESCRIPTION'>[+ HTML::Entities::encode_entities( $ERROR_DESCRIPTION ) +]</div>
+<!-- ****************************************************************************************** -->
+<!-- ****************************************************************************************** -->
+<!-- begin example query parameters -->
+<!--
+CHASSIS_MODE => MV_AUM
+CHASSIS_REFERER_ID => MV_AUM_921319803.038602
+CHASSIS_UNIQUE_ID => 0.4070378437527167
+fav_port_date => 3/28/2014^WEEKLY
+port_date => 3/28/2014
+snapshot_type => WEEKLY
+-->
+<!-- end example query parameters -->
+<!-- ****************************************************************************************** -->
+<!-- ****************************************************************************************** -->
+[!
+sub formatMoney 
+{
+    my $number = sprintf "%.2f", shift @_;
+    # Add one comma each time through the do-nothing loop
+    1 while $number =~ s/^(-?\d+)(\d\d\d)/$1,$2/;
+    # Put the dollar sign in the right place
+    $number =~ s/^(-?)/$1\$/;
+    $number;
+} # end sub formatMoney 
+sub get_status_decode
+{
+    my $status = shift;
+    
+    my $status_fmt = '';
+    
+    my $found = 0;
+    foreach my $key (keys(%{$BFM::AUM::MVAUM::STATUS}))
+    {
+        if($BFM::AUM::MVAUM::STATUS->{$key} eq $status)
+        {
+            $status_fmt = $BFM::AUM::MVAUM::STATUS_LABELS->{$status};
+            $found = 1;
+            last;
+        }
+    }
+    if(!$found)
+    {
+        $status_fmt = 'Unknown';
+    }
+    return $status_fmt;
+} # end sub get_status_decode
+sub get_period_ending_type
+{
+    my $datatype = shift;
+    
+    my $periodEndingType = '';
+    my $purpose = '';
+    my $found = 0;
+    foreach my $key (keys(%{$BFM::AUM::MVAUM::HOLDING_PURPOSE}))
+    {
+        if($key eq $datatype)
+        {
+            $purpose = $BFM::AUM::MVAUM::HOLDING_PURPOSE->{$datatype};
+            $periodEndingType = $BFM::AUM::MVAUM::HOLDING_PURPOSE_LABELS->{$purpose};
+            $found = 1;
+            last;
+        }
+    }
+    if(!$found)
+    {
+        $periodEndingType = 'Unknown';
+    }
+    
+    return $periodEndingType    ;
+} # end sub get_period_ending_type
+sub get_snapshots
+{
+    my $benchStart;
+    my $benchEnd;
+    $benchStart = new Benchmark if $BENCHMARK_OK;
+    
+    my $output = '';
+    my $blockIsOK = eval
+    {
+        $mvaum = new BFM::AUM::MVAUM($options);
+     
+        my $results = $mvaum->get_snapshots();
+        my $number_of_results = @$results;
+        my $port_date = $rhModeData->{'port_date'};
+    
+        my $snapshot_date;
+        my $gross;
+        my $dd;
+        my $net;
+        my $status;
+        my $datatype;
+        my $number_of_portfolios;
+        my $created_by;
+        
+        my $status_fmt = '';
+        my $periodEndingType = '';
+        
+        if($number_of_results)
+        {
+            # got some records
+            foreach my $row (@$results) 
+            {
+                $snapshot_date = $row->{snapshot_date};
+                $gross = &formatMoney($row->{gross});
+                $dd    = &formatMoney($row->{dd});
+                $net   = &formatMoney($row->{net});
+                
+                $status = $row->{status};
+                $status_fmt = &get_status_decode($status);
+                
+                $datatype = $row->{datatype};
+                $number_of_portfolios = $row->{number_of_portfolios};
+                $created_by = $row->{created_by};
+    
+                $periodEndingType = ' - ' . &get_period_ending_type($datatype);
+                # *************************************************************************************
+                $output .= 
+                    '<table class="sumTable center">' . 
+                        '<caption><h2><a href="#nogo" menu="active_menu" itemsToHide="item1,item2,item3" target="_blank" title="Click to display menu" data-datatype="' . 
+                            $datatype . 
+                            '" data-status="' .
+                            $status .
+                            '" data-snapshot-date="' . 
+                            $snapshot_date . 
+                            '">Snapshot of ' . 
+                            $snapshot_date . $periodEndingType . 
+                            '</a></h2></caption>' .
+                        '<tbody>' . 
+                            '<tr class="even">' .
+                                '<th class="sumTableLabel">Status</th>' .
+                                '<td class="sumTableValue">' . $status_fmt . '</td>' .
+                            '</tr>' .
+                            '<tr class="odd">' .
+                                '<th># of Portfolios</th>' .
+                                '<td class="sumTableValue">' . $number_of_portfolios . '</td>' .
+                            '</tr>' .
+                            '<tr class="even">' .
+                                '<th class="sumTableLabel">True Gross (Sleeve Level)</th>' .
+                                '<td class="sumTableValue">' . $gross . '</td>' .
+                            '</tr>' .
+                            
+                            '<tr class="odd">' .
+                                '<th class="sumTableLabel">Double Dip</th>' .
+                                '<td class="sumTableValue">' . $dd . '</td>' .
+                            '</tr>' .
+                            '<tr class="even">' .
+                                '<th>Net AUM (AUM Sleeve Level)</th>' .
+                                '<td class="sumTableValue">' . $net . '</td>' .
+                            '</tr>' .
+                            
+                        '</tbody>' .
+                    '</table>';
+            } # foreach my $row (@$results) 
+        }
+        else
+        {
+            # got no records
+            # $periodEndingType = ' - ' . $rhSnapshots->{'snapshot_type'};
+            $datatype = $BFM::AUM::MVAUM::PURPOSE->{$rhSnapshots->{'snapshot_type'}};
+            $periodEndingType = ' - ' . &get_period_ending_type($datatype);
+            
+            $output = 
+                '<table class="sumTable center">' . 
+                #'<caption><h2><a href="#nogo">Snapshot of ' . $rhModeData->{'port_date'} . $periodEndingType . '</a></h2></caption>' .
+                '<caption><h2><span>Snapshot of ' . $rhModeData->{'port_date'} . $periodEndingType . '</span></h2></caption>' .
+                '<tbody>' . 
+                '<tr class="odd">' .
+                '<th class="sumTableLabel">Status</th>' .
+                '<td class="sumTableValue">No Record Found</td>' .
+                '</tr>' .
+                '</tbody>' .
+                '</table>';
+        }
+        1;
+    }; # end my $blockIsOK = eval
+    unless($blockIsOK)
+    {  
+        $output = "<div>An error occurred</div>";
+        $logLogNG->Log(LOG_INFO,"mv_aum.epl::get_snapshots error: $@");
+    }
+    $benchEnd = new Benchmark if $BENCHMARK_OK;
+    $logLogNG->Log(LOG_INFO, 'mv_aum.epl::get_snapshots benchmark total: ' . timestr(timediff($benchEnd, $benchStart))) if $BENCHMARK_OK;
+    
+    return $output;
+} # end sub get_snapshots
+sub get_all_snapshots
+{
+    my $benchStart;
+    my $benchEnd;
+    $benchStart = new Benchmark if $BENCHMARK_OK;
+    
+    my $output = '';
+    my $blockIsOK = eval
+    {
+        $mvaum = new BFM::AUM::MVAUM($options);
+        
+        
+        my $results = $mvaum->get_all_snapshots($MAXIMUM_NUMBER_OF_SNAPSHOTS, $BFM::AUM::MVAUM::PURPOSE->{MONTHLY});
+        
+        
+        my $number_of_results = @$results;
+        my $port_date = $rhModeData->{'port_date'};
+    
+        my $snapshot_date;
+        my $gross;
+        my $dd;
+        my $net;
+        my $status;
+        my $datatype;
+        my $number_of_portfolios;
+        my $created_by;
+        
+        my $count = 0;
+        my $status_fmt = '';
+        
+        $output = '<table class="sumTable center"><caption><h2>All Available Snapshots</h2></caption>' . 
+            '<thead>' . 
+            '<tr>' . 
+            '<th>Snapshot Time</th><th>True Gross (Sleeve Level)</th><th>Status</th><th># of Portfolios or Portfolio Name</th><th>Created By</th>' . 
+            '</tr>' .
+            '</thead>' . 
+            '<tbody>';
+        
+        if($number_of_results)
+        {
+            # got some records
+            foreach my $row (@$results) 
+            {
+                $count++;
+                
+                $snapshot_date = $row->{snapshot_date};
+                
+                $gross = &formatMoney($row->{gross});
+                $dd    = &formatMoney($row->{dd});
+                $net   = &formatMoney($row->{net});
+                
+                $status = $row->{status};
+                $status_fmt = &get_status_decode($status);
+                
+                $datatype = $row->{datatype};
+                $number_of_portfolios = $row->{number_of_portfolios};
+                $created_by = $row->{created_by};
+                
+                my $periodEndingType = ' - ' . &get_period_ending_type($datatype);
+                
+                # *************************************************************************************
+                
+                $output .= '<tr class="' . ($count % 2 ? 'odd' : 'even') . '">' .
+                    '<td><a href="#nogo" id="active_draft' . $count . '" menu="active_menu" itemsToHide="item1,item2,item3" target="_blank" title="Click to display menu" data-datatype="' . 
+                        $datatype . 
+                        '" data-status="' .
+                        $status .
+                        '" data-snapshot-date="' . 
+                        $snapshot_date . 
+                        '">Snapshot of ' . 
+                        $snapshot_date . $periodEndingType . 
+                        '</a></td>'. 
+                    '<td>' . $gross . '</td>'. 
+                    '<td>' . $status_fmt . '</td>'. 
+                    '<td>' . $number_of_portfolios . '</td>'. 
+                    '<td>' . $created_by . '</td>'. 
+                    '</tr>';
+                    
+                # *************************************************************************************
+                    
+            } # foreach my $row (@$results) 
+        }
+        else
+        {
+            # got no records
+            $output = 
+                '<tr class="even">' .
+                    '<th colspan="5" class="sumTableValue">No Record Found</th>' .
+                '</tr>';
+        }
+        $output .= '</tbody></table>';
+        
+        1;
+    }; # end my $blockIsOK = eval
+    unless($blockIsOK)
+    {  
+        $output = "<div>An error occurred</div>";
+        $logLogNG->Log(LOG_INFO,"mv_aum.epl::get_all_snapshots error: $@");
+    }
+    $benchEnd = new Benchmark if $BENCHMARK_OK;
+    $logLogNG->Log(LOG_INFO, 'mv_aum.epl::get_all_snapshots benchmark total: ' . timestr(timediff($benchEnd, $benchStart))) if $BENCHMARK_OK;
+    return $output;
+} # end sub get_all_snapshots
+!]
+<!-- ****************************************************************************************** -->
+<!-- ****************************************************************************************** -->
+<!-- ****************************************************************************************** -->
+<!-- ****************************************************************************************** -->
+<div class="mv_aum center">
+<div class="summary">
+[+ &get_snapshots() +]   
+</div>
+</div>
+<!-- ****************************************************************************************** -->
+<!-- ****************************************************************************************** -->
+<!-- ****************************************************************************************** -->
+<!-- ****************************************************************************************** -->
+<div class="mv_aum center">
+[$ if $rhModeData->{'PERMS'}->{'aumPAdd'}->{'OK'} $]
+    [$ if $rhModeData->{'ENABLE_REFRESH'} $]
+        <input class="input" type='submit' value='Refresh Snapshot' chassisMode='MV_AUM_REFRESH_SNAPSHOT'/>
+    [$ endif $]
+[$ endif $]
+[$ if $rhModeData->{'PERMS'}->{'aumPAdd'}->{'OK'} $]
+    [$ if $rhModeData->{'ENABLE_CREATE'} $]
+        <input class="input" type='submit' value='Create Snapshot' chassisMode='MV_AUM_CREATE_SNAPSHOT'/>
+    [$ endif $]
+[$ endif $]
+[$ if $rhModeData->{'PERMS'}->{'aumPPublish'}->{'OK'} $]
+    [$ if $rhModeData->{'ENABLE_PUBLISH'} $]
+        <input class="input" type='submit' value='Publish Snapshot' chassisMode='MV_AUM_PUBLISH'/>
+    [$ endif $]
+[$ endif $]
+</div>
+<!-- ****************************************************************************************** -->
+<!-- ****************************************************************************************** -->
+<div class="mv_aum center">
+<div class="summary">
+[+ &get_all_snapshots() +]
+</div>
+</div>
